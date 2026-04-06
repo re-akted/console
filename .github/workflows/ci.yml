@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install meson (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+
+      - name: Install meson (macOS)
+        if: runner.os == 'macOS'
+        run: brew install meson ninja
+
+      - name: Install meson (Windows)
+        if: runner.os == 'Windows'
+        run: pip install meson ninja
+
+      - name: Setup
+        run: meson setup build -Dwerror=true
+
+      - name: Build
+        run: meson compile -C build
+
+      - name: Test
+        run: meson test -C build --verbose
+
+  release:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: librconsole.so
+            archive: rconsole-linux-x86_64.tar.gz
+          - os: macos-latest
+            artifact: librconsole.dylib
+            archive: rconsole-macos-universal.tar.gz
+          - os: windows-latest
+            artifact: rconsole.dll
+            archive: rconsole-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install meson (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build
+
+      - name: Install meson (macOS)
+        if: runner.os == 'macOS'
+        run: brew install meson ninja
+
+      - name: Install meson (Windows)
+        if: runner.os == 'Windows'
+        run: pip install meson ninja
+
+      - name: Build
+        run: meson setup build --buildtype=release && meson compile -C build
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/include
+          cp -r include/redakt dist/include/
+          cp build/${{ matrix.artifact }} dist/
+          cp build/librconsole.a dist/
+          tar -czf ${{ matrix.archive }} -C dist .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist/include
+          cp -r include/redakt dist/include/
+          cp build/${{ matrix.artifact }} dist/
+          cp build/librconsole.a dist/ 2>/dev/null || true
+          cd dist && 7z a -tzip ../${{ matrix.archive }} .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  tag:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create tag and release
+        run: |
+          TAG=$(date -u +'%Y.%m.%d-%H.%M')
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Attach artifacts to tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(git describe --tags --abbrev=0)
+          gh release create "$TAG" artifacts/*/* --title "$TAG" --notes "Automated release $TAG"
